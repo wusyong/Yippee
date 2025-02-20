@@ -4,9 +4,7 @@ use base::id::WebViewId;
 use compositing_traits::ConstellationMsg;
 use crossbeam_channel::Sender;
 use embedder_traits::{
-    AllowOrDeny, ContextMenuResult, Cursor, EmbedderMsg, InputEvent, MouseButton,
-    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, PromptResult, TouchEventAction,
-    TraversalDirection, WheelMode,
+    AllowOrDeny, ContextMenuResult, Cursor, EmbedderMsg, ImeEvent, InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, PromptResult, TouchEventAction, TraversalDirection, WheelMode
 };
 use euclid::{Point2D, Size2D};
 use glutin::{
@@ -15,7 +13,7 @@ use glutin::{
 };
 use glutin_winit::DisplayBuilder;
 use ipc_channel::ipc::IpcSender;
-use keyboard_types::{Code, KeyState, KeyboardEvent, Modifiers};
+use keyboard_types::{Code, CompositionEvent, CompositionState, KeyState, KeyboardEvent, Modifiers};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use muda::{Menu as MudaMenu, MenuEvent, MenuEventReceiver, MenuItem};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -31,7 +29,7 @@ use webrender_api::{
 use winit::window::ResizeDirection;
 use winit::{
     dpi::PhysicalPosition,
-    event::{ElementState, TouchPhase, WindowEvent},
+    event::{ElementState, Ime, TouchPhase, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::ModifiersState,
     window::{CursorIcon, Window as WinitWindow, WindowAttributes, WindowId},
@@ -519,6 +517,66 @@ impl Window {
                 );
             }
             WindowEvent::ModifiersChanged(modifier) => self.modifiers_state.set(modifier.state()),
+            WindowEvent::Ime(event) => {
+                let webview_id = match self.focused_webview_id {
+                    Some(webview_id) => webview_id,
+                    None => {
+                        log::trace!("No focused webview, skipping Ime event.");
+                        return;
+                    }
+                };
+                if !self.has_webview(webview_id) {
+                    log::trace!(
+                        "Webview {:?} doesn't exist, skipping Ime event.",
+                        webview_id
+                    );
+                    return;
+                }
+
+                match event {
+                    Ime::Commit(text) => {
+                        let text = text.clone();
+                        forward_input_event(
+                            compositor,
+                            sender,
+                            InputEvent::Ime(ImeEvent::Composition(CompositionEvent {
+                                state: CompositionState::End,
+                                data: text,
+                            })),
+                        );
+                    },
+                    Ime::Enabled => {
+                        forward_input_event(
+                            compositor,
+                            sender,
+                            InputEvent::Ime(ImeEvent::Composition(CompositionEvent {
+                                state: CompositionState::Start,
+                                data: String::new(),
+                            })),
+                        );
+                    }
+                    Ime::Preedit(text, _) => {
+                        forward_input_event(
+                            compositor,
+                            sender,
+                            InputEvent::Ime(ImeEvent::Composition(CompositionEvent {
+                                state: CompositionState::Update,
+                                data: text.to_string(),
+                            })),
+                        );
+                    },
+                    Ime::Disabled => {
+                        forward_input_event(
+                            compositor,
+                            sender,
+                            InputEvent::Ime(ImeEvent::Composition(CompositionEvent {
+                                state: CompositionState::End,
+                                data: String::new(),
+                            })),
+                        );
+                    }
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let webview_id = match self.focused_webview_id {
                     Some(webview_id) => webview_id,
@@ -534,7 +592,6 @@ impl Window {
                     );
                     return;
                 }
-
                 let event = keyboard_event_from_winit(event, self.modifiers_state.get());
                 log::trace!("Verso is handling {:?}", event);
 
